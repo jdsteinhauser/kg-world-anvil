@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kg-world-anvil"
+version = "0.1.0"
+description = "Knowledge graph builder TUI with OpenAI extraction and SurrealDB storage"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.80.0",
+    "openai>=1.50.0",
+    "surrealdb>=1.0.0",
+    "beautifulsoup4>=4.12.0",
+    "markdown-it-py>=3.0.0",
+    "bbcode>=1.1.0",
+    "rapidfuzz>=3.9.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+kg = "kg_world_anvil.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kg_world_anvil"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/kg_world_anvil" = "kg_world_anvil"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
