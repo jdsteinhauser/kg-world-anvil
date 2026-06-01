@@ -5,7 +5,8 @@ from kg_world_anvil.ingestion.chunker import chunk_text, clean_text, detect_form
 from kg_world_anvil.ingestion.html import clean_html
 from kg_world_anvil.ingestion.markdown import clean_markdown
 from kg_world_anvil.models import TextFormat
-from kg_world_anvil.normalization.resolver import canonical_key, cosine_similarity
+from kg_world_anvil.normalization.names import canonical_key
+from kg_world_anvil.normalization.resolver import cosine_similarity
 from kg_world_anvil.query.queries import validate_readonly
 
 
@@ -46,6 +47,7 @@ def test_chunk_text_overlap():
 def test_canonical_key():
     assert canonical_key("  Alice  ") == "alice"
     assert canonical_key("Bob\tSmith") == "bob smith"
+    assert canonical_key("the mayor") == "mayor"
 
 
 def test_cosine_similarity():

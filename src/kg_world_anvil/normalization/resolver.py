@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
-import unicodedata
 
 from openai import OpenAI
 from rapidfuzz import fuzz
@@ -13,13 +11,12 @@ from kg_world_anvil.config import Settings, get_settings
 from kg_world_anvil.models import ExtractedEntity, MergeCandidate, ResolvedEntity
 from kg_world_anvil.models import attributes_to_dict
 from kg_world_anvil.db.repository import GraphRepository
-
-
-def canonical_key(name: str) -> str:
-    normalized = unicodedata.normalize("NFKC", name)
-    normalized = normalized.casefold().strip()
-    normalized = re.sub(r"\s+", " ", normalized)
-    return normalized
+from kg_world_anvil.normalization.names import (
+    canonical_key,
+    entity_identity_key,
+    normalize_entity_name,
+    names_equivalent,
+)
 
 
 class EntityResolver:
@@ -52,10 +49,20 @@ class EntityResolver:
         for entity in pool:
             if entity.type != extracted.type:
                 continue
-            score = fuzz.token_sort_ratio(extracted.name, entity.name)
-            alias_scores = [fuzz.token_sort_ratio(extracted.name, alias) for alias in entity.aliases]
+            score = fuzz.token_sort_ratio(
+                canonical_key(extracted.name),
+                entity.canonical_key or canonical_key(entity.name),
+            )
+            alias_scores = [
+                fuzz.token_sort_ratio(canonical_key(extracted.name), canonical_key(alias))
+                for alias in entity.aliases
+            ]
             best_alias = max(alias_scores) if alias_scores else 0
             best = max(score, best_alias)
+            if names_equivalent(extracted.name, entity.name):
+                best = 100
+            elif any(names_equivalent(extracted.name, alias) for alias in entity.aliases):
+                best = 100
             if best >= self.settings.fuzzy_match_threshold:
                 candidates.append(
                     MergeCandidate(
@@ -82,11 +89,17 @@ class EntityResolver:
             matched = next(e for e in pool if e.id == candidates[0].existing_id)
             return matched, candidates
 
+        normalized_name = normalize_entity_name(extracted.name)
+        aliases: list[str] = []
+        raw_name = extracted.name.strip()
+        if raw_name and raw_name != normalized_name:
+            aliases.append(raw_name)
+
         new_entity = ResolvedEntity(
-            name=extracted.name.strip(),
+            name=normalized_name,
             canonical_key=key,
             type=extracted.type.strip(),
-            aliases=[],
+            aliases=aliases,
             attributes=attributes_to_dict(extracted.attributes),
             is_new=True,
         )
@@ -102,8 +115,12 @@ class EntityResolver:
                 canonical_key(candidate.existing_name), candidate.existing_type
             ) or entity
         if entity.id and candidate.extracted_name not in entity.aliases:
-            if candidate.extracted_name != entity.name:
-                entity.aliases.append(candidate.extracted_name)
+            raw_name = candidate.extracted_name.strip()
+            if raw_name and raw_name != entity.name and raw_name not in entity.aliases:
+                entity.aliases.append(raw_name)
+            normalized = normalize_entity_name(candidate.extracted_name)
+            if normalized and normalized != entity.name and normalized not in entity.aliases:
+                entity.aliases.append(normalized)
         return entity
 
     async def _embedding_candidates(

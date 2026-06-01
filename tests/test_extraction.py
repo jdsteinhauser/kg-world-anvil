@@ -2,6 +2,7 @@
 
 from kg_world_anvil.extraction.extractor import dedupe_extraction
 from kg_world_anvil.models import (
+    CanonicalPredicate,
     EntityAttribute,
     ExtractedEntity,
     ExtractedRelationship,
@@ -26,10 +27,16 @@ def test_dedupe_entities_and_relationships():
         ],
         relationships=[
             ExtractedRelationship(
-                subject="Alice", predicate="knows", object="Bob", confidence=1.0
+                subject="Alice",
+                predicate=CanonicalPredicate.KNOWS,
+                object="Bob",
+                confidence=1.0,
             ),
             ExtractedRelationship(
-                subject="alice", predicate="knows", object="bob", confidence=1.0
+                subject="alice",
+                predicate=CanonicalPredicate.KNOWS,
+                object="bob",
+                confidence=1.0,
             ),
         ],
     )

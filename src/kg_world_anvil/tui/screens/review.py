@@ -9,6 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from kg_world_anvil.tui.services import PendingReview
+from kg_world_anvil.normalization.names import entity_identity_key
 
 
 class ReviewScreen(Screen):
@@ -44,7 +45,7 @@ class ReviewScreen(Screen):
         services = self.app.services  # type: ignore[attr-defined]
         for idx, item in enumerate(services.pending_reviews):
             best = item.candidates[0] if item.candidates else None
-            key = (item.extracted_name.lower(), item.extracted_type.lower())
+            key = entity_identity_key(item.extracted_name, item.extracted_type)
             decision = self._decisions.get(key, "pending")
             table.add_row(
                 item.extracted_name,
@@ -80,7 +81,7 @@ class ReviewScreen(Screen):
         if row_idx >= len(services.pending_reviews):
             return
         item = services.pending_reviews[row_idx]
-        key = (item.extracted_name.lower(), item.extracted_type.lower())
+        key = entity_identity_key(item.extracted_name, item.extracted_type)
         self._decisions[key] = decision
         self.refresh_table()
         self.query_one("#review-status", Static).update(f"Set {item.extracted_name} -> {decision}")
@@ -95,7 +96,7 @@ class ReviewScreen(Screen):
         services = self.app.services  # type: ignore[attr-defined]
         decisions = dict(self._decisions)
         for item in services.pending_reviews:
-            key = (item.extracted_name.lower(), item.extracted_type.lower())
+            key = entity_identity_key(item.extracted_name, item.extracted_type)
             decisions.setdefault(key, "create_new")
         status.update("[yellow]Committing...[/yellow]")
         try:

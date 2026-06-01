@@ -6,21 +6,23 @@ from openai import OpenAI
 
 from kg_world_anvil.config import Settings, get_settings
 from kg_world_anvil.db.client import load_schema_text
-from kg_world_anvil.models import GeneratedQuery
+from kg_world_anvil.models import GeneratedQuery, format_predicate_prompt
 
-SCHEMA_SUMMARY = """
+SCHEMA_SUMMARY = f"""
 Tables:
 - document: raw source text (raw, format, content_hash, ingested_at)
-- entity: graph nodes (name, canonical_key, type, aliases[], attributes{}, source_documents[])
-- Named relation tables (e.g. parent_of, located_in, knows): each TYPE RELATION FROM entity TO entity
-  with fields confidence, source_document, extracted_at. The table name is the relationship type.
+- entity: graph nodes (name, canonical_key, type, aliases[], attributes{{}}, source_documents[])
+- Named relation tables (one per canonical predicate): each TYPE RELATION FROM entity TO entity
+  with fields confidence, detail, source_document, extracted_at.
+
+{format_predicate_prompt()}
 
 Common patterns:
 - SELECT * FROM entity WHERE name = 'Alice';
 - SELECT * FROM entity WHERE type = 'person';
-- SELECT out.name AS target FROM knows WHERE in.name = 'Alice';
+- SELECT out.name AS target, detail FROM member_of WHERE in.name = 'Alice';
 - SELECT in.name AS source, out.name AS target FROM parent_of;
-- Traverse any edge type: SELECT ->?->entity FROM entity WHERE name = 'Alice';
+- Traverse any edge type: SELECT ->? FROM entity WHERE name = 'Alice';
 """
 
 

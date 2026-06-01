@@ -21,6 +21,47 @@ class EntityAttribute(BaseModel):
     value: str = Field(description="Attribute value from the source text")
 
 
+class CanonicalPredicate(str, Enum):
+    """Controlled vocabulary for relationship types stored in the graph."""
+
+    LOCATED_IN = "located_in"
+    PART_OF = "part_of"
+    CONTAINS = "contains"
+    MEMBER_OF = "member_of"
+    LEADS = "leads"
+    REPORTS_TO = "reports_to"
+    ALLIED_WITH = "allied_with"
+    OPPOSED_TO = "opposed_to"
+    KNOWS = "knows"
+    PARENT_OF = "parent_of"
+    SPOUSE_OF = "spouse_of"
+    SIBLING_OF = "sibling_of"
+    CREATED_BY = "created_by"
+    FOUNDED_BY = "founded_by"
+    OWNED_BY = "owned_by"
+    PARTICIPATED_IN = "participated_in"
+    OCCURRED_AT = "occurred_at"
+    MENTIONS = "mentions"
+    DEPICTS = "depicts"
+    INSPIRED_BY = "inspired_by"
+    ASSOCIATED_WITH = "associated_with"
+
+
+def predicate_values() -> list[str]:
+    return [p.value for p in CanonicalPredicate]
+
+
+def format_predicate_prompt() -> str:
+    lines = ["Use ONLY these relationship predicates:"]
+    for predicate in CanonicalPredicate:
+        lines.append(f"- {predicate.value}")
+    lines.append(
+        "Put extra nuance in detail (e.g. predicate=member_of, detail='serves as mayor'). "
+        "Use associated_with only when no other predicate fits."
+    )
+    return "\n".join(lines)
+
+
 class ExtractedEntity(BaseModel):
     name: str = Field(description="Entity display name as found in source text")
     type: str = Field(description="Entity type, e.g. person, location, organization, concept")
@@ -31,9 +72,13 @@ class ExtractedEntity(BaseModel):
 
 class ExtractedRelationship(BaseModel):
     subject: str = Field(description="Subject entity name")
-    predicate: str = Field(description="Relationship type, e.g. parent_of, located_in")
+    predicate: CanonicalPredicate = Field(description="Canonical relationship type from the allowed list")
     object: str = Field(description="Object entity name")
     confidence: float = Field(description="Confidence score from 0.0 to 1.0", ge=0.0, le=1.0)
+    detail: str = Field(
+        default="",
+        description="Optional nuance from the source text; empty string if none",
+    )
 
 
 class ExtractionResult(BaseModel):
@@ -87,6 +132,7 @@ class DocumentRecord(BaseModel):
 class GraphEdge(BaseModel):
     id: str | None = None
     predicate: str
+    detail: str = ""
     confidence: float = 1.0
     source_document_id: str | None = None
     from_entity_id: str

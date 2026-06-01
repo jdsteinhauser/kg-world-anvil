@@ -8,7 +8,19 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Select, Static, TextArea
 
+from kg_world_anvil.debug_log import debug_log
 from kg_world_anvil.models import TextFormat
+
+
+def resolve_text_format(fmt_select: Select) -> TextFormat | None:
+    """Map Select value to TextFormat, treating unset/auto as auto-detect."""
+    value = fmt_select.value
+    if value is Select.NULL or value is None:
+        return None
+    fmt_value = str(value)
+    if fmt_value in {"auto", "Select.NULL"}:
+        return None
+    return TextFormat(fmt_value)
 
 
 class IngestScreen(Screen):
@@ -28,6 +40,7 @@ class IngestScreen(Screen):
                 ("Auto-detect", "auto"),
             ],
             prompt="Format",
+            value="auto",
             id="format-select",
         )
         yield TextArea(id="ingest-text", language="markdown")
@@ -61,8 +74,31 @@ class IngestScreen(Screen):
         if not raw:
             status.update("[red]No text to extract.[/red]")
             return
-        fmt_value = str(fmt_select.value)
-        fmt = None if fmt_value == "auto" else TextFormat(fmt_value)
+        # #region agent log
+        debug_log(
+            "ingest.py:extract_knowledge",
+            "format select value",
+            {
+                "value": str(fmt_select.value),
+                "is_null": fmt_select.value is Select.NULL,
+            },
+            hypothesis_id="A",
+        )
+        # #endregion
+        try:
+            fmt = resolve_text_format(fmt_select)
+        except ValueError as exc:
+            status.update(f"[red]Invalid format selection: {exc}[/red]")
+            return
+        # #region agent log
+        debug_log(
+            "ingest.py:extract_knowledge:resolved",
+            "resolved format",
+            {"fmt": None if fmt is None else fmt.value},
+            hypothesis_id="A",
+            run_id="post-fix",
+        )
+        # #endregion
         status.update("[yellow]Extracting...[/yellow]")
         try:
             services = self.app.services  # type: ignore[attr-defined]
@@ -78,6 +114,7 @@ class IngestScreen(Screen):
     @work(exclusive=True)
     async def commit_to_graph(self) -> None:
         status = self.query_one("#ingest-status", Static)
+        text_area = self.query_one("#ingest-text", TextArea)
         services = self.app.services  # type: ignore[attr-defined]
         if not services.last_extraction:
             status.update("[red]Run extraction first.[/red]")
@@ -89,6 +126,7 @@ class IngestScreen(Screen):
         status.update("[yellow]Committing...[/yellow]")
         try:
             entities, rels = await services.commit_extraction({})
+            text_area.text = ""
             status.update(f"[green]Committed {entities} new entities and {rels} relationships.[/green]")
         except Exception as exc:
             status.update(f"[red]Commit failed: {exc}[/red]")

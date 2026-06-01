@@ -8,6 +8,7 @@ from kg_world_anvil.db.client import DatabaseClient
 
 _RELATION_FIELD_STATEMENTS = (
     "DEFINE FIELD confidence ON {table} TYPE float DEFAULT 1.0;",
+    "DEFINE FIELD detail ON {table} TYPE string DEFAULT '';",
     "DEFINE FIELD source_document ON {table} TYPE option<record<document>> DEFAULT NONE;",
     "DEFINE FIELD extracted_at ON {table} TYPE datetime DEFAULT time::now();",
 )

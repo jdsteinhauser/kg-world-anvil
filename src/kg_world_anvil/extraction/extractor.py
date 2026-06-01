@@ -6,22 +6,53 @@ from openai import OpenAI
 
 from kg_world_anvil.config import Settings, get_settings
 from kg_world_anvil.models import (
+    EntityAttribute,
     ExtractedEntity,
     ExtractedRelationship,
     ExtractionResult,
-    EntityAttribute,
     attributes_to_dict,
+    format_predicate_prompt,
 )
+from kg_world_anvil.debug_log import debug_log
+from kg_world_anvil.extraction.predicates import is_relationship_negated_in_text
+from kg_world_anvil.normalization.names import canonical_key, normalize_entity_name
 
-SYSTEM_PROMPT = """You extract a knowledge graph from source text.
+SYSTEM_PROMPT = f"""You extract a knowledge graph from source text.
 
 Rules:
 - Only extract entities and relationships explicitly supported by the text.
 - Do not invent facts not present in the source.
-- Use concise entity types (person, location, organization, event, concept, item, etc.).
-- Use snake_case relationship predicates (e.g. parent_of, located_in, member_of).
+- Use concise entity types (person, location, organization, event, concept, item, role, etc.).
 - Include optional attributes as key-value pairs only when clearly stated in the text.
-- Prefer canonical names over nicknames when both appear.
+- Only extract positive, asserted relationships between entities.
+- Do NOT extract negated or absence relationships; if the text only says two things are NOT connected, omit it.
+- Never use associated_with when the text negates a connection (e.g. "X was not associated with Y" -> extract X and Y as entities only, no relationship).
+
+Relationships (important):
+{format_predicate_prompt()}
+
+Entity naming (important):
+- Prefer the most specific proper name available in the text over generic type words.
+- For places (city, county, town, village, region, river, lake, mountain, etc.):
+  - When the text names a place, use that proper name as the entity — never the bare type word.
+  - Resolve later generic references ("the city", "the county") to the proper name introduced earlier in the document.
+  - Use the same proper place name consistently across all entities and relationships.
+  - Only use a bare generic place noun when the document never names that specific place.
+- Do NOT include leading articles unless they are part of a proper name.
+- Do NOT include wrapping quotes or emphasis markers in names.
+- Keep proper names as written: "The Beatles" stays "The Beatles"; "The Hague" stays "The Hague"; "Oran County" stays "Oran County".
+- For titles and roles (mayor, king, captain, etc.):
+  - When a title is held by a named person, extract the person as the entity and express the role as a relationship with the role in detail — do NOT create a standalone generic role entity.
+  - Only create a role as its own entity when no specific person is named.
+- Use the same canonical name consistently across all entities and relationships in your response.
+- Examples:
+  - "the city of Twickenham" or later "the city" when Twickenham was named -> entity name: "Twickenham" (type: city), NOT "city"
+  - "Oran County" or "the county" when Oran County was named -> entity name: "Oran County", NOT "county"
+  - "Mayor Alice announced..." -> entity: "Alice" (person); relationship with detail "mayor" (e.g. leads or member_of)
+  - "the mayor announced..." with no name given -> entity name: "mayor" (type: role)
+  - "Alice works as mayor of Twickenham" -> entity: "Alice"; predicate: member_of or leads, detail: "mayor of Twickenham"
+  - "a local bakery" -> entity name: "local bakery" (only when no proper name is given)
+  - "the old bridge collapsed" -> entity name: "old bridge" (only when no proper name is given)
 """
 
 
@@ -61,14 +92,41 @@ class KnowledgeExtractor:
             result = self.extract_chunk(chunk)
             merged.entities.extend(result.entities)
             merged.relationships.extend(result.relationships)
-        return dedupe_extraction(merged)
+        deduped = dedupe_extraction(merged)
+        return filter_negated_relationships(deduped, text)
+
+
+def filter_negated_relationships(result: ExtractionResult, source_text: str) -> ExtractionResult:
+    """Drop relationships whose source text explicitly negates the link."""
+    kept: list[ExtractedRelationship] = []
+    for rel in result.relationships:
+        negated = is_relationship_negated_in_text(rel.subject, rel.object, source_text)
+        # #region agent log
+        debug_log(
+            "extractor.py:filter_negated_relationships",
+            "relationship negation check",
+            {
+                "subject": rel.subject,
+                "predicate": rel.predicate.value,
+                "object": rel.object,
+                "negated_in_text": negated,
+            },
+            hypothesis_id="A",
+        )
+        # #endregion
+        if negated:
+            continue
+        kept.append(rel)
+    return ExtractionResult(entities=result.entities, relationships=kept)
 
 
 def dedupe_extraction(result: ExtractionResult) -> ExtractionResult:
     entity_map: dict[tuple[str, str], ExtractedEntity] = {}
     for entity in result.entities:
-        key = (entity.name.strip().lower(), entity.type.strip().lower())
+        normalized_name = normalize_entity_name(entity.name)
+        key = (canonical_key(entity.name), entity.type.strip().lower())
         if key not in entity_map:
+            entity.name = normalized_name
             entity_map[key] = entity
         else:
             existing = entity_map[key]
@@ -78,19 +136,21 @@ def dedupe_extraction(result: ExtractionResult) -> ExtractionResult:
                 EntityAttribute(key=k, value=v) for k, v in merged_attrs.items()
             ]
 
-    rel_set: set[tuple[str, str, str]] = set()
-    relationships: list[ExtractedRelationship] = []
+    rel_map: dict[tuple[str, str, str], ExtractedRelationship] = {}
     for rel in result.relationships:
         key = (
-            rel.subject.strip().lower(),
-            rel.predicate.strip().lower(),
-            rel.object.strip().lower(),
+            canonical_key(rel.subject),
+            rel.predicate.value,
+            canonical_key(rel.object),
         )
-        if key not in rel_set:
-            rel_set.add(key)
-            relationships.append(rel)
+        if key not in rel_map:
+            rel_map[key] = rel
+        else:
+            existing = rel_map[key]
+            if rel.detail.strip() and not existing.detail.strip():
+                existing.detail = rel.detail.strip()
 
     return ExtractionResult(
         entities=list(entity_map.values()),
-        relationships=relationships,
+        relationships=list(rel_map.values()),
     )

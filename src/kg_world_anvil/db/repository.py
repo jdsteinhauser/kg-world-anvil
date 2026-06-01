@@ -13,7 +13,9 @@ from kg_world_anvil.db.relations import (
     ensure_relation_table,
     predicate_from_record_id,
 )
-from kg_world_anvil.models import DocumentRecord, GraphEdge, ResolvedEntity, TextFormat
+from kg_world_anvil.extraction.predicates import is_absence_relationship
+from kg_world_anvil.models import CanonicalPredicate, DocumentRecord, GraphEdge, ResolvedEntity, TextFormat
+from kg_world_anvil.normalization.names import canonical_key
 
 
 def _record_id(value: Any) -> str:
@@ -121,12 +123,15 @@ class GraphRepository:
         return self._row_to_entity(row)
 
     async def find_entity_by_name_or_alias(self, name: str) -> list[ResolvedEntity]:
+        key = canonical_key(name)
         sql = """
         SELECT * FROM entity
-        WHERE name = $name OR $name INSIDE aliases
+        WHERE name = $name
+           OR $name INSIDE aliases
+           OR canonical_key = $key
         LIMIT 20;
         """
-        rows = await self.client.query(sql, {"name": name})
+        rows = await self.client.query(sql, {"name": name, "key": key})
         return [self._row_to_entity(r) for r in _all_results(rows)]
 
     async def list_entities(self, search: str = "", limit: int = 100) -> list[ResolvedEntity]:
@@ -210,7 +215,14 @@ class GraphRepository:
         predicate: str,
         confidence: float = 1.0,
         document_id: str | None = None,
+        detail: str = "",
     ) -> GraphEdge:
+        if is_absence_relationship(predicate):
+            raise ValueError(f"Absence relationships are not stored: {predicate}")
+        normalized = predicate.strip().lower()
+        allowed = {p.value for p in CanonicalPredicate}
+        if normalized not in allowed:
+            raise ValueError(f"Unknown relationship predicate: {predicate}")
         from_ref = _to_record_id(from_id, "entity")
         to_ref = _to_record_id(to_id, "entity")
         doc_ref = _to_record_id(document_id, "document")
@@ -218,6 +230,7 @@ class GraphRepository:
         sql = f"""
         RELATE $from->{relation_table}->$to SET
             confidence = $confidence,
+            detail = $detail,
             source_document = $doc,
             extracted_at = time::now()
         RETURN AFTER;
@@ -228,6 +241,7 @@ class GraphRepository:
                 "from": from_ref,
                 "to": to_ref,
                 "confidence": confidence,
+                "detail": detail,
                 "doc": doc_ref,
             },
         )
@@ -236,6 +250,7 @@ class GraphRepository:
         return GraphEdge(
             id=edge_id,
             predicate=predicate_from_record_id(edge_id) or relation_table,
+            detail=row.get("detail") or detail,
             confidence=row.get("confidence", confidence),
             source_document_id=_record_id(row.get("source_document")),
             from_entity_id=from_id,
@@ -250,6 +265,7 @@ class GraphRepository:
         SELECT
             id,
             confidence,
+            detail,
             source_document,
             in AS from_entity,
             out AS to_entity
@@ -259,6 +275,7 @@ class GraphRepository:
         SELECT
             id,
             confidence,
+            detail,
             source_document,
             in AS from_entity,
             out AS to_entity
@@ -284,6 +301,7 @@ class GraphRepository:
                 GraphEdge(
                     id=edge_id,
                     predicate=predicate_from_record_id(edge_id),
+                    detail=str(row.get("detail") or ""),
                     confidence=float(conf) if conf is not None else 1.0,
                     source_document_id=_record_id(row.get("source_document")),
                     from_entity_id=from_id,

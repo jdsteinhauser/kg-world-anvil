@@ -32,7 +32,7 @@ class GraphScreen(Screen):
         entity_table = self.query_one("#entity-table", DataTable)
         entity_table.add_columns("Name", "Type", "Aliases", "ID")
         edge_table = self.query_one("#edge-table", DataTable)
-        edge_table.add_columns("From", "Predicate", "To", "Confidence")
+        edge_table.add_columns("From", "Predicate", "Detail", "To", "Confidence")
         self.search_entities()
 
     @on(Button.Pressed, "#graph-search-btn")
@@ -82,6 +82,7 @@ class GraphScreen(Screen):
                 edge_table.add_row(
                     edge.from_entity_name or edge.from_entity_id,
                     edge.predicate,
+                    edge.detail or "-",
                     edge.to_entity_name or edge.to_entity_id,
                     f"{edge.confidence:.2f}",
                 )

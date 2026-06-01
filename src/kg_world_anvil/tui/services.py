@@ -18,6 +18,7 @@ from kg_world_anvil.models import (
     TextFormat,
     attributes_to_dict,
 )
+from kg_world_anvil.normalization.names import canonical_key, entity_identity_key
 from kg_world_anvil.normalization.resolver import EntityResolver
 from kg_world_anvil.query.nl import NLQueryTranslator
 from kg_world_anvil.query.queries import QueryService
@@ -93,7 +94,7 @@ class AppServices:
         existing = await self.repo.get_all_entities_for_matching()
         seen: set[tuple[str, str]] = set()
         for entity in result.entities:
-            key = (entity.name.lower(), entity.type.lower())
+            key = entity_identity_key(entity.name, entity.type)
             if key in seen:
                 continue
             seen.add(key)
@@ -122,15 +123,16 @@ class AppServices:
         existing = await self.repo.get_all_entities_for_matching()
 
         for extracted in self.last_extraction.entities:
-            key = (extracted.name.lower(), extracted.type.lower())
+            key = entity_identity_key(extracted.name, extracted.type)
             decision = merge_decisions.get(key, "create_new")
             resolved, candidates = await self.resolver.resolve_entity(extracted, existing)
 
             if decision == "merge" and candidates:
                 target = next((e for e in existing if e.id == candidates[0].existing_id), None)
                 if target:
-                    if extracted.name not in target.aliases and extracted.name != target.name:
-                        target.aliases.append(extracted.name)
+                    raw_name = extracted.name.strip()
+                    if raw_name not in target.aliases and raw_name != target.name:
+                        target.aliases.append(raw_name)
                     target.attributes.update(attributes_to_dict(extracted.attributes))
                     saved = await self.repo.upsert_entity(target, self.last_document_id)
                     resolved = saved
@@ -144,11 +146,11 @@ class AppServices:
                 continue
 
             if resolved.id:
-                entity_id_map[extracted.name.lower()] = resolved.id
+                entity_id_map[canonical_key(extracted.name)] = resolved.id
 
         for rel in self.last_extraction.relationships:
-            from_id = entity_id_map.get(rel.subject.lower())
-            to_id = entity_id_map.get(rel.object.lower())
+            from_id = entity_id_map.get(canonical_key(rel.subject))
+            to_id = entity_id_map.get(canonical_key(rel.object))
             if not from_id:
                 subj_entities = await self.repo.find_entity_by_name_or_alias(rel.subject)
                 if subj_entities:
@@ -161,9 +163,10 @@ class AppServices:
                 await self.repo.create_relationship(
                     from_id,
                     to_id,
-                    rel.predicate,
+                    rel.predicate.value,
                     rel.confidence,
                     self.last_document_id,
+                    rel.detail.strip(),
                 )
                 rel_count += 1
 
