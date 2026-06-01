@@ -3,6 +3,7 @@
 from kg_world_anvil.extraction.extractor import dedupe_extraction
 from kg_world_anvil.extraction.extractor import filter_negated_relationships
 from kg_world_anvil.extraction.predicates import (
+    format_absence_relationship_prompt,
     is_absence_relationship,
     is_relationship_negated_in_text,
 )
@@ -11,6 +12,14 @@ from kg_world_anvil.models import (
     ExtractedRelationship,
     ExtractionResult,
 )
+
+
+def test_format_absence_relationship_prompt_lists_blocked_predicates():
+    prompt = format_absence_relationship_prompt()
+    assert "not_associated_with" in prompt
+    assert "unrelated_to" in prompt
+    assert "not_" in prompt
+    assert "associated_with" in prompt
 
 
 def test_is_absence_relationship_detects_negated_predicates():

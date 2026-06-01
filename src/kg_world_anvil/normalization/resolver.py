@@ -1,4 +1,4 @@
-"""Entity name normalization and resolution."""
+"""Entity resolution against the graph store."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from kg_world_anvil.db.repository import GraphRepository
 from kg_world_anvil.normalization.names import (
     canonical_key,
     entity_identity_key,
-    normalize_entity_name,
-    names_equivalent,
+    normalize_display_name,
+    normalize_entity_type,
 )
 
 
@@ -36,8 +36,10 @@ class EntityResolver:
         extracted: ExtractedEntity,
         existing_entities: list[ResolvedEntity] | None = None,
     ) -> tuple[ResolvedEntity, list[MergeCandidate]]:
-        key = canonical_key(extracted.name)
-        exact = await self.repo.find_entity_by_key(key, extracted.type)
+        display_name = normalize_display_name(extracted.name)
+        entity_type = normalize_entity_type(extracted.type)
+        key = canonical_key(display_name)
+        exact = await self.repo.find_entity_by_key(key, entity_type)
         if exact:
             return exact, []
 
@@ -46,28 +48,49 @@ class EntityResolver:
         if pool is None:
             pool = await self.repo.get_all_entities_for_matching()
 
+        same_key = [
+            entity
+            for entity in pool
+            if canonical_key(entity.canonical_key or entity.name) == key
+        ]
+        for entity in same_key:
+            if entity.type.strip().casefold() == entity_type:
+                continue
+            candidates.append(
+                MergeCandidate(
+                    extracted_name=display_name,
+                    extracted_type=entity_type,
+                    existing_id=entity.id or "",
+                    existing_name=entity.name,
+                    existing_type=entity.type,
+                    score=1.0,
+                    match_method="exact_key",
+                )
+            )
+
         for entity in pool:
-            if entity.type != extracted.type:
+            if entity.type.strip().casefold() != entity_type:
                 continue
             score = fuzz.token_sort_ratio(
-                canonical_key(extracted.name),
-                entity.canonical_key or canonical_key(entity.name),
+                key,
+                canonical_key(entity.canonical_key or entity.name),
             )
             alias_scores = [
-                fuzz.token_sort_ratio(canonical_key(extracted.name), canonical_key(alias))
+                fuzz.token_sort_ratio(key, canonical_key(alias))
                 for alias in entity.aliases
             ]
             best_alias = max(alias_scores) if alias_scores else 0
             best = max(score, best_alias)
-            if names_equivalent(extracted.name, entity.name):
+            entity_key = canonical_key(entity.canonical_key or entity.name)
+            if key == entity_key:
                 best = 100
-            elif any(names_equivalent(extracted.name, alias) for alias in entity.aliases):
+            elif any(key == canonical_key(alias) for alias in entity.aliases):
                 best = 100
             if best >= self.settings.fuzzy_match_threshold:
                 candidates.append(
                     MergeCandidate(
-                        extracted_name=extracted.name,
-                        extracted_type=extracted.type,
+                        extracted_name=display_name,
+                        extracted_type=entity_type,
                         existing_id=entity.id or "",
                         existing_name=entity.name,
                         existing_type=entity.type,
@@ -77,7 +100,10 @@ class EntityResolver:
                 )
 
         if self.settings.use_embeddings and self._openai:
-            embedding_candidates = await self._embedding_candidates(extracted, pool)
+            embedding_candidates = await self._embedding_candidates(
+                ExtractedEntity(name=display_name, type=entity_type, attributes=extracted.attributes),
+                pool,
+            )
             seen_ids = {c.existing_id for c in candidates}
             for candidate in embedding_candidates:
                 if candidate.existing_id not in seen_ids:
@@ -89,17 +115,11 @@ class EntityResolver:
             matched = next(e for e in pool if e.id == candidates[0].existing_id)
             return matched, candidates
 
-        normalized_name = normalize_entity_name(extracted.name)
-        aliases: list[str] = []
-        raw_name = extracted.name.strip()
-        if raw_name and raw_name != normalized_name:
-            aliases.append(raw_name)
-
         new_entity = ResolvedEntity(
-            name=normalized_name,
+            name=display_name,
             canonical_key=key,
-            type=extracted.type.strip(),
-            aliases=aliases,
+            type=entity_type,
+            aliases=[],
             attributes=attributes_to_dict(extracted.attributes),
             is_new=True,
         )
@@ -114,13 +134,10 @@ class EntityResolver:
             entity = await self.repo.find_entity_by_key(
                 canonical_key(candidate.existing_name), candidate.existing_type
             ) or entity
-        if entity.id and candidate.extracted_name not in entity.aliases:
-            raw_name = candidate.extracted_name.strip()
-            if raw_name and raw_name != entity.name and raw_name not in entity.aliases:
-                entity.aliases.append(raw_name)
-            normalized = normalize_entity_name(candidate.extracted_name)
-            if normalized and normalized != entity.name and normalized not in entity.aliases:
-                entity.aliases.append(normalized)
+        if entity.id:
+            alias = candidate.extracted_name.strip()
+            if alias and alias != entity.name and alias not in entity.aliases:
+                entity.aliases.append(alias)
         return entity
 
     async def _embedding_candidates(

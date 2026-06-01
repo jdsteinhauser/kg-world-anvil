@@ -13,23 +13,63 @@ from kg_world_anvil.models import (
     attributes_to_dict,
     format_predicate_prompt,
 )
-from kg_world_anvil.debug_log import debug_log
-from kg_world_anvil.extraction.predicates import is_relationship_negated_in_text
-from kg_world_anvil.normalization.names import canonical_key, normalize_entity_name
+from kg_world_anvil.extraction.predicates import (
+    format_absence_relationship_prompt,
+    is_relationship_negated_in_text,
+)
+from kg_world_anvil.normalization.names import canonical_key, normalize_display_name, normalize_entity_type
 
-SYSTEM_PROMPT = f"""You extract a knowledge graph from source text.
+
+def normalize_extraction_result(result: ExtractionResult) -> ExtractionResult:
+    """Clean entity and relationship names before dedupe and storage."""
+    entities = [
+        ExtractedEntity(
+            name=normalize_display_name(entity.name),
+            type=normalize_entity_type(entity.type),
+            attributes=entity.attributes,
+        )
+        for entity in result.entities
+    ]
+    relationships = [
+        ExtractedRelationship(
+            subject=normalize_display_name(rel.subject),
+            predicate=rel.predicate,
+            object=normalize_display_name(rel.object),
+            confidence=rel.confidence,
+            detail=rel.detail,
+        )
+        for rel in result.relationships
+    ]
+    return ExtractionResult(entities=entities, relationships=relationships)
+
+SYSTEM_PROMPT = f"""You extract a knowledge graph from articles and timelines.
+These articles and timelinesare from WorldAnvil, and they are specifically about
+world-building, manuscript writing, and TTRPG campaigns.
 
 Rules:
-- Only extract entities and relationships explicitly supported by the text.
-- Do not invent facts not present in the source.
-- Use concise entity types (person, location, organization, event, concept, item, role, etc.).
+- The types of texts/articles you will encounter are about buildings, characters, countries, militaries, gods/deities,
+  geographical features, items (coins, tools, weapons, etc.), organizations (including families), religions, species,
+  vehicles, settlements, conditions (diseases, injuries, etc.), conflicts, documents, cultures/ethnicities, languages,
+  materials (wood, metal, stone, etc.), military formations, myths, natural laws, plots, professions, prose, titles,
+  spells, technology and traditions.
+- Do not include indefinite articles on entity names
+- If name can be inferred from the context
+- Titles should be treated separately from the entity name. If the entity is never named,
+  create a role entity instead.
+- Timeline events should be created with a start date/year, end date/year, and a brief description.
+- If entities are said to have a relationship, extract the relationship as a relationship between the two entities.
+- If entities are said to not be associated with each other, no relationship should be extracted.
 - Include optional attributes as key-value pairs only when clearly stated in the text.
-- Only extract positive, asserted relationships between entities.
-- Do NOT extract negated or absence relationships; if the text only says two things are NOT connected, omit it.
-- Never use associated_with when the text negates a connection (e.g. "X was not associated with Y" -> extract X and Y as entities only, no relationship).
+- Only extract entities and relationships explicitly supported by the text.
+- Do not invent facts not present in the source. If you do not have enough information to extract an entity or relationship,
+  do not extract anything.
+
 
 Relationships (important):
 {format_predicate_prompt()}
+
+Absence and negated relationships (never extract):
+{format_absence_relationship_prompt()}
 
 Entity naming (important):
 - Prefer the most specific proper name available in the text over generic type words.
@@ -44,6 +84,7 @@ Entity naming (important):
 - For titles and roles (mayor, king, captain, etc.):
   - When a title is held by a named person, extract the person as the entity and express the role as a relationship with the role in detail — do NOT create a standalone generic role entity.
   - Only create a role as its own entity when no specific person is named.
+- Emit final display-ready names in every entity and relationship field (no quotes, markdown, or duplicate variants); downstream code stores names as given.
 - Use the same canonical name consistently across all entities and relationships in your response.
 - Examples:
   - "the city of Twickenham" or later "the city" when Twickenham was named -> entity name: "Twickenham" (type: city), NOT "city"
@@ -93,7 +134,8 @@ class KnowledgeExtractor:
             merged.entities.extend(result.entities)
             merged.relationships.extend(result.relationships)
         deduped = dedupe_extraction(merged)
-        return filter_negated_relationships(deduped, text)
+        normalized = normalize_extraction_result(deduped)
+        return filter_negated_relationships(normalized, text)
 
 
 def filter_negated_relationships(result: ExtractionResult, source_text: str) -> ExtractionResult:
@@ -101,19 +143,6 @@ def filter_negated_relationships(result: ExtractionResult, source_text: str) -> 
     kept: list[ExtractedRelationship] = []
     for rel in result.relationships:
         negated = is_relationship_negated_in_text(rel.subject, rel.object, source_text)
-        # #region agent log
-        debug_log(
-            "extractor.py:filter_negated_relationships",
-            "relationship negation check",
-            {
-                "subject": rel.subject,
-                "predicate": rel.predicate.value,
-                "object": rel.object,
-                "negated_in_text": negated,
-            },
-            hypothesis_id="A",
-        )
-        # #endregion
         if negated:
             continue
         kept.append(rel)
@@ -123,11 +152,15 @@ def filter_negated_relationships(result: ExtractionResult, source_text: str) -> 
 def dedupe_extraction(result: ExtractionResult) -> ExtractionResult:
     entity_map: dict[tuple[str, str], ExtractedEntity] = {}
     for entity in result.entities:
-        normalized_name = normalize_entity_name(entity.name)
-        key = (canonical_key(entity.name), entity.type.strip().lower())
+        clean_name = normalize_display_name(entity.name)
+        clean_type = normalize_entity_type(entity.type)
+        key = (canonical_key(clean_name), clean_type)
         if key not in entity_map:
-            entity.name = normalized_name
-            entity_map[key] = entity
+            entity_map[key] = ExtractedEntity(
+                name=clean_name,
+                type=clean_type,
+                attributes=entity.attributes,
+            )
         else:
             existing = entity_map[key]
             merged_attrs = attributes_to_dict(existing.attributes)
@@ -139,12 +172,18 @@ def dedupe_extraction(result: ExtractionResult) -> ExtractionResult:
     rel_map: dict[tuple[str, str, str], ExtractedRelationship] = {}
     for rel in result.relationships:
         key = (
-            canonical_key(rel.subject),
+            canonical_key(normalize_display_name(rel.subject)),
             rel.predicate.value,
-            canonical_key(rel.object),
+            canonical_key(normalize_display_name(rel.object)),
         )
         if key not in rel_map:
-            rel_map[key] = rel
+            rel_map[key] = ExtractedRelationship(
+                subject=normalize_display_name(rel.subject),
+                predicate=rel.predicate,
+                object=normalize_display_name(rel.object),
+                confidence=rel.confidence,
+                detail=rel.detail,
+            )
         else:
             existing = rel_map[key]
             if rel.detail.strip() and not existing.detail.strip():

@@ -16,6 +16,22 @@ class TextFormat(str, Enum):
     BBCODE = "bbcode"
 
 
+def parse_text_format(value: object | None) -> TextFormat | None:
+    """Parse a format hint; return None for auto-detect / unset Select values."""
+    if value is None:
+        return None
+    fmt_value = str(value).strip()
+    if not fmt_value or fmt_value.casefold() in {"auto", "select.null"}:
+        return None
+    return TextFormat(fmt_value)
+
+
+def coerce_text_format(value: object | None, *, default: TextFormat = TextFormat.PLAIN) -> TextFormat:
+    """Parse stored format values, falling back when invalid or unset."""
+    parsed = parse_text_format(value)
+    return parsed if parsed is not None else default
+
+
 class EntityAttribute(BaseModel):
     key: str = Field(description="Attribute name")
     value: str = Field(description="Attribute value from the source text")
@@ -116,9 +132,73 @@ class ResolvedEntity(BaseModel):
     canonical_key: str
     type: str
     aliases: list[str] = Field(default_factory=list)
+    broader_types: list[str] = Field(default_factory=list)
     attributes: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] | None = None
     is_new: bool = False
+
+
+class DuplicateGroup(BaseModel):
+    canonical_key: str
+    members: list[ResolvedEntity] = Field(default_factory=list)
+    suggested_survivor_type: str = ""
+
+
+class MergePlan(BaseModel):
+    canonical_key: str
+    survivor_id: str
+    survivor_type: str
+    survivor_name: str
+    loser_ids: list[str] = Field(default_factory=list)
+    merged_aliases: list[str] = Field(default_factory=list)
+    broader_types: list[str] = Field(default_factory=list)
+    merged_attributes: dict[str, Any] = Field(default_factory=dict)
+    edges_to_rewire: int = 0
+
+
+class StagingBatchStatus(str, Enum):
+    DRAFT = "draft"
+    COMMITTED = "committed"
+    DISCARDED = "discarded"
+
+
+class StagingBatch(BaseModel):
+    id: str | None = None
+    document_id: str
+    status: StagingBatchStatus = StagingBatchStatus.DRAFT
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class StagingEntity(ResolvedEntity):
+    batch_id: str = ""
+
+
+class StagingEdge(BaseModel):
+    id: str | None = None
+    predicate: str
+    detail: str = ""
+    confidence: float = 1.0
+    from_entity_id: str
+    to_entity_id: str
+
+
+class CollapsedStagingEntity(BaseModel):
+    canonical_key: str
+    survivor_type: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    broader_types: list[str] = Field(default_factory=list)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    member_ids: list[str] = Field(default_factory=list)
+
+
+class PromoteResult(BaseModel):
+    entities_created: int = 0
+    entities_updated: int = 0
+    edges_created: int = 0
+    edges_skipped: int = 0
+    staging_groups_collapsed: int = 0
 
 
 class DocumentRecord(BaseModel):

@@ -24,6 +24,23 @@ _NEGATIVE_PREDICATES = frozenset(
 )
 
 
+def format_absence_relationship_prompt() -> str:
+    """Prompt text for relationships that must not be extracted or stored."""
+    examples = ", ".join(sorted(_NEGATIVE_PREDICATES))
+    prefix_examples = ", ".join(f"{p}…" for p in _NEGATIVE_PREFIXES)
+    stem_examples = ", ".join(_NEGATIVE_STEMS)
+    return "\n".join(
+        [
+            "Do NOT extract negated, absence, or lack-of-connection relationships.",
+            "If the text only says two entities are NOT related, NOT associated, or have NO connection, omit the relationship (entities may still be extracted).",
+            f"Never use predicates such as: {examples}.",
+            f"Never invent predicates starting with: {prefix_examples}",
+            f"Never use predicates implying disconnection (stems such as: {stem_examples}).",
+            "Do not use associated_with (or any allowed predicate) to represent a negated link — omit the edge instead.",
+        ]
+    )
+
+
 def normalize_predicate(predicate: str) -> str:
     return predicate.strip().lower().replace(" ", "_").replace("-", "_")
 

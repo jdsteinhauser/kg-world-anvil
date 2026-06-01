@@ -9,28 +9,33 @@ from kg_world_anvil.config import Settings, get_settings
 from kg_world_anvil.consistency.rules import ConsistencyChecker
 from kg_world_anvil.db.client import DatabaseClient
 from kg_world_anvil.db.repository import GraphRepository
+from kg_world_anvil.db.staging_repository import StagingRepository
 from kg_world_anvil.extraction.extractor import KnowledgeExtractor
 from kg_world_anvil.ingestion.chunker import clean_text, detect_format
 from kg_world_anvil.models import (
     ExtractionResult,
     MergeCandidate,
-    ResolvedEntity,
+    MergePlan,
+    PromoteResult,
+    StagingBatch,
     TextFormat,
-    attributes_to_dict,
 )
-from kg_world_anvil.normalization.names import canonical_key, entity_identity_key
+from kg_world_anvil.normalization.dedup import EntityDeduplicator
+from kg_world_anvil.normalization.names import canonical_key
 from kg_world_anvil.normalization.resolver import EntityResolver
 from kg_world_anvil.query.nl import NLQueryTranslator
 from kg_world_anvil.query.queries import QueryService
+from kg_world_anvil.staging.collapse import collapse_staging_entities
+from kg_world_anvil.staging.promoter import StagingPromoter
 
 
 @dataclass
 class PendingReview:
-    extracted_name: str
-    extracted_type: str
-    entity: ResolvedEntity
-    candidates: list[MergeCandidate] = field(default_factory=list)
-    attributes: dict = field(default_factory=dict)
+    canonical_key: str
+    display_name: str
+    staging_types: list[str]
+    prod_candidates: list[MergeCandidate] = field(default_factory=list)
+    member_count: int = 1
 
 
 @dataclass
@@ -38,14 +43,18 @@ class AppServices:
     settings: Settings
     db_client: DatabaseClient
     repo: GraphRepository
+    staging_repo: StagingRepository
+    promoter: StagingPromoter
     extractor: KnowledgeExtractor
     resolver: EntityResolver
     query_service: QueryService
     nl_translator: NLQueryTranslator
     consistency: ConsistencyChecker
+    deduplicator: EntityDeduplicator
     pending_reviews: list[PendingReview] = field(default_factory=list)
     last_extraction: ExtractionResult | None = None
     last_document_id: str | None = None
+    draft_batch: StagingBatch | None = None
 
     @classmethod
     async def create(cls) -> AppServices:
@@ -53,16 +62,23 @@ class AppServices:
         db_client = DatabaseClient(settings)
         await db_client.connect()
         repo = GraphRepository(db_client)
-        return cls(
+        staging_repo = StagingRepository(db_client, repo)
+        promoter = StagingPromoter(repo, staging_repo, settings)
+        services = cls(
             settings=settings,
             db_client=db_client,
             repo=repo,
+            staging_repo=staging_repo,
+            promoter=promoter,
             extractor=KnowledgeExtractor(settings),
             resolver=EntityResolver(repo, settings),
             query_service=QueryService(repo),
             nl_translator=NLQueryTranslator(settings),
             consistency=ConsistencyChecker(repo),
+            deduplicator=EntityDeduplicator(repo),
         )
+        services.draft_batch = await staging_repo.get_draft_batch()
+        return services
 
     async def close(self) -> None:
         await self.db_client.close()
@@ -86,89 +102,143 @@ class AppServices:
         result = self.extractor.extract_text(cleaned)
         self.last_extraction = result
         self.last_document_id = doc_id
-        await self._build_review_queue(result)
+
+        if self.settings.use_staging:
+            self.draft_batch = await self.staging_repo.replace_draft_for_document(
+                doc_id, result
+            )
+            await self._build_staging_review_queue()
+        else:
+            await self._build_legacy_review_queue(result)
+
         return result, doc_id
 
-    async def _build_review_queue(self, result: ExtractionResult) -> None:
+    async def _build_staging_review_queue(self) -> None:
+        self.pending_reviews.clear()
+        if not self.draft_batch or not self.draft_batch.id:
+            return
+
+        entities = await self.staging_repo.list_staging_entities(self.draft_batch.id)
+        if not entities:
+            return
+
+        collapsed = collapse_staging_entities(entities)
+        existing = await self.repo.get_all_entities_for_matching()
+
+        for group in collapsed:
+            prod_matches = [
+                entity
+                for entity in existing
+                if canonical_key(entity.canonical_key or entity.name) == group.canonical_key
+            ]
+            candidates: list[MergeCandidate] = []
+            for match in prod_matches:
+                candidates.append(
+                    MergeCandidate(
+                        extracted_name=group.name,
+                        extracted_type=group.survivor_type,
+                        existing_id=match.id or "",
+                        existing_name=match.name,
+                        existing_type=match.type,
+                        score=1.0,
+                        match_method="exact_key",
+                    )
+                )
+
+            needs_review = len(group.member_ids) > 1 or bool(candidates)
+            if not needs_review:
+                continue
+
+            staging_types = list(
+                {
+                    entity.type
+                    for entity in entities
+                    if entity.id in group.member_ids or (
+                        len(group.member_ids) == 1
+                        and canonical_key(entity.canonical_key or entity.name)
+                        == group.canonical_key
+                    )
+                }
+            )
+            if not staging_types:
+                staging_types = [group.survivor_type]
+
+            self.pending_reviews.append(
+                PendingReview(
+                    canonical_key=group.canonical_key,
+                    display_name=group.name,
+                    staging_types=staging_types,
+                    prod_candidates=candidates,
+                    member_count=len(group.member_ids) or 1,
+                )
+            )
+
+    async def _build_legacy_review_queue(self, result: ExtractionResult) -> None:
         self.pending_reviews.clear()
         existing = await self.repo.get_all_entities_for_matching()
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         for entity in result.entities:
-            key = entity_identity_key(entity.name, entity.type)
+            key = canonical_key(entity.name)
             if key in seen:
                 continue
             seen.add(key)
             resolved, candidates = await self.resolver.resolve_entity(entity, existing)
-            if candidates and resolved.is_new:
+            if candidates:
                 self.pending_reviews.append(
                     PendingReview(
-                        extracted_name=entity.name,
-                        extracted_type=entity.type,
-                        entity=resolved,
-                        candidates=candidates,
-                        attributes=attributes_to_dict(entity.attributes),
+                        canonical_key=key,
+                        display_name=entity.name,
+                        staging_types=[entity.type],
+                        prod_candidates=candidates,
+                        member_count=1,
                     )
                 )
 
-    async def commit_extraction(
+    async def scan_duplicates(self):
+        return await self.deduplicator.find_duplicate_groups()
+
+    async def apply_dedup(self, plan: MergePlan) -> int:
+        return await self.deduplicator.apply_merge(plan)
+
+    async def promote_draft_batch(
         self,
-        merge_decisions: dict[tuple[str, str], str],
-    ) -> tuple[int, int]:
-        if not self.last_extraction or not self.last_document_id:
-            raise RuntimeError("No extraction to commit.")
+        merge_decisions: dict[str, str] | None = None,
+        survivor_types: dict[str, str] | None = None,
+    ) -> PromoteResult:
+        if not self.settings.use_staging:
+            raise RuntimeError("Staging is disabled; enable use_staging in config.")
+        if not self.draft_batch or not self.draft_batch.id:
+            raise RuntimeError("No draft staging batch to promote.")
 
-        entity_id_map: dict[str, str] = {}
-        entity_count = 0
-        rel_count = 0
-        existing = await self.repo.get_all_entities_for_matching()
+        decisions = merge_decisions or {}
+        skipped_keys = {
+            key for key, action in decisions.items() if action == "skip"
+        }
+        survivor_types = dict(survivor_types or {})
+        for item in self.pending_reviews:
+            decision = decisions.get(item.canonical_key, "create_new")
+            if decision == "merge" and item.prod_candidates:
+                prod_type = item.prod_candidates[0].existing_type
+                survivor_types.setdefault(item.canonical_key, prod_type)
+            elif len(item.staging_types) > 1 and item.canonical_key not in survivor_types:
+                survivor_types.setdefault(item.canonical_key, item.staging_types[0])
 
-        for extracted in self.last_extraction.entities:
-            key = entity_identity_key(extracted.name, extracted.type)
-            decision = merge_decisions.get(key, "create_new")
-            resolved, candidates = await self.resolver.resolve_entity(extracted, existing)
-
-            if decision == "merge" and candidates:
-                target = next((e for e in existing if e.id == candidates[0].existing_id), None)
-                if target:
-                    raw_name = extracted.name.strip()
-                    if raw_name not in target.aliases and raw_name != target.name:
-                        target.aliases.append(raw_name)
-                    target.attributes.update(attributes_to_dict(extracted.attributes))
-                    saved = await self.repo.upsert_entity(target, self.last_document_id)
-                    resolved = saved
-            elif decision != "skip":
-                embedding = await self.resolver.embed_entity(extracted.name)
-                saved = await self.repo.upsert_entity(resolved, self.last_document_id, embedding)
-                resolved = saved
-                existing.append(saved)
-                entity_count += 1
-            else:
-                continue
-
-            if resolved.id:
-                entity_id_map[canonical_key(extracted.name)] = resolved.id
-
-        for rel in self.last_extraction.relationships:
-            from_id = entity_id_map.get(canonical_key(rel.subject))
-            to_id = entity_id_map.get(canonical_key(rel.object))
-            if not from_id:
-                subj_entities = await self.repo.find_entity_by_name_or_alias(rel.subject)
-                if subj_entities:
-                    from_id = subj_entities[0].id
-            if not to_id:
-                obj_entities = await self.repo.find_entity_by_name_or_alias(rel.object)
-                if obj_entities:
-                    to_id = obj_entities[0].id
-            if from_id and to_id:
-                await self.repo.create_relationship(
-                    from_id,
-                    to_id,
-                    rel.predicate.value,
-                    rel.confidence,
-                    self.last_document_id,
-                    rel.detail.strip(),
-                )
-                rel_count += 1
-
+        result = await self.promoter.promote_draft_batch(
+            self.draft_batch.id,
+            survivor_types=survivor_types,
+            skipped_keys=skipped_keys,
+        )
         self.pending_reviews.clear()
-        return entity_count, rel_count
+        self.draft_batch = None
+        self.last_extraction = None
+        self.last_document_id = None
+        return result
+
+    async def discard_draft_batch(self) -> None:
+        if not self.draft_batch or not self.draft_batch.id:
+            raise RuntimeError("No draft staging batch to discard.")
+        await self.staging_repo.discard_draft_batch(self.draft_batch.id)
+        self.draft_batch = None
+        self.pending_reviews.clear()
+        self.last_extraction = None
+        self.last_document_id = None

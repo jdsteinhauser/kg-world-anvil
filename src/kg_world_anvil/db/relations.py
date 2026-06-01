@@ -45,3 +45,30 @@ async def ensure_relation_table(client: DatabaseClient, predicate: str) -> str:
             # Table/field may already exist from a prior ingest.
             pass
     return table
+
+
+def staging_relation_table_name(predicate: str) -> str:
+    return f"staging_{normalize_relation_table(predicate)}"
+
+
+async def ensure_staging_relation_table(client: DatabaseClient, predicate: str) -> str:
+    """Ensure a SCHEMAFULL staging relation table exists for the given predicate."""
+    table = staging_relation_table_name(predicate)
+    statements = [
+        f"DEFINE TABLE {table} TYPE RELATION FROM staging_entity TO staging_entity SCHEMAFULL;",
+        *[stmt.format(table=table) for stmt in _RELATION_FIELD_STATEMENTS],
+    ]
+    for statement in statements:
+        try:
+            await client.query(statement)
+        except Exception:
+            pass
+    return table
+
+
+def is_staging_table_name(name: str) -> bool:
+    return name.startswith("staging_") or name in ("staging_batch", "staging_entity")
+
+
+def is_staging_relation_table(name: str) -> bool:
+    return name.startswith("staging_") and name not in ("staging_batch", "staging_entity")

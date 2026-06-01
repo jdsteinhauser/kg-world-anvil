@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     chunk_size: int = 4000
     chunk_overlap: int = 400
 
+    auto_dedup: bool = True
+    dedup_policy: str = "type-rank"
+    dedup_type_rank: str = (
+        "city,town,village,settlement,region,location,building,geographical feature,country"
+    )
+
+    use_staging: bool = True
+
     @property
     def schema_path(self) -> Path:
         return Path(__file__).resolve().parent.parent.parent / "schema.surql"

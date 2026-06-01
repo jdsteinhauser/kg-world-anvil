@@ -1,6 +1,7 @@
 """Tests for canonical predicate helpers."""
 
 from kg_world_anvil.extraction.extractor import SYSTEM_PROMPT
+from kg_world_anvil.extraction.predicates import format_absence_relationship_prompt
 from kg_world_anvil.models import CanonicalPredicate, format_predicate_prompt, predicate_values
 
 
@@ -28,3 +29,13 @@ def test_system_prompt_prefers_specific_place_names():
 def test_system_prompt_roles_as_relationships_to_named_person():
     assert "do NOT create a standalone generic role entity" in SYSTEM_PROMPT
     assert "Mayor Alice announced" in SYSTEM_PROMPT
+
+
+def test_system_prompt_includes_absence_relationship_guidance():
+    assert format_absence_relationship_prompt() in SYSTEM_PROMPT
+    assert "not_associated_with" in SYSTEM_PROMPT
+
+
+def test_system_prompt_names_are_final_display_form():
+    assert "display-ready names" in SYSTEM_PROMPT
+    assert "stores names as given" in SYSTEM_PROMPT

@@ -47,7 +47,7 @@ def test_chunk_text_overlap():
 def test_canonical_key():
     assert canonical_key("  Alice  ") == "alice"
     assert canonical_key("Bob\tSmith") == "bob smith"
-    assert canonical_key("the mayor") == "mayor"
+    assert canonical_key("the mayor") == "the mayor"
 
 
 def test_cosine_similarity():

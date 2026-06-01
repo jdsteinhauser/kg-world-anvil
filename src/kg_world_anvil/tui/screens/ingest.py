@@ -4,23 +4,19 @@ from __future__ import annotations
 
 from textual import on, work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Select, Static, TextArea
 
-from kg_world_anvil.debug_log import debug_log
-from kg_world_anvil.models import TextFormat
+from kg_world_anvil.models import TextFormat, parse_text_format
 
 
 def resolve_text_format(fmt_select: Select) -> TextFormat | None:
     """Map Select value to TextFormat, treating unset/auto as auto-detect."""
     value = fmt_select.value
-    if value is Select.NULL or value is None:
+    if value is Select.NULL or value == Select.NULL:
         return None
-    fmt_value = str(value)
-    if fmt_value in {"auto", "Select.NULL"}:
-        return None
-    return TextFormat(fmt_value)
+    return parse_text_format(value)
 
 
 class IngestScreen(Screen):
@@ -46,12 +42,27 @@ class IngestScreen(Screen):
         yield TextArea(id="ingest-text", language="markdown")
         yield Horizontal(
             Button("Extract", variant="primary", id="extract-btn"),
-            Button("Commit to Graph", id="commit-btn"),
+            Button("Promote to Graph", id="commit-btn"),
             Button("Review Queue", id="review-btn"),
+            Button("Discard Draft", id="discard-btn"),
             id="ingest-actions",
         )
         yield Static("Paste or load text, then extract entities and relationships.", id="ingest-status")
         yield Footer()
+
+    def clear_input(self) -> None:
+        """Clear the ingest text area (e.g. after a successful promote)."""
+        self.query_one("#ingest-text", TextArea).clear()
+
+    @staticmethod
+    def clear_input_on_app(app) -> None:
+        """Clear ingest text from another screen when ingest may not be active."""
+        try:
+            ingest = app.get_screen("ingest")
+        except Exception:
+            return
+        if isinstance(ingest, IngestScreen):
+            ingest.clear_input()
 
     @on(Button.Pressed, "#extract-btn")
     def on_extract(self) -> None:
@@ -59,11 +70,15 @@ class IngestScreen(Screen):
 
     @on(Button.Pressed, "#commit-btn")
     def on_commit(self) -> None:
-        self.commit_to_graph()
+        self.promote_to_graph()
 
     @on(Button.Pressed, "#review-btn")
     def on_review(self) -> None:
         self.app.switch_screen("review")
+
+    @on(Button.Pressed, "#discard-btn")
+    def on_discard(self) -> None:
+        self.discard_draft()
 
     @work(exclusive=True)
     async def extract_knowledge(self) -> None:
@@ -74,59 +89,82 @@ class IngestScreen(Screen):
         if not raw:
             status.update("[red]No text to extract.[/red]")
             return
-        # #region agent log
-        debug_log(
-            "ingest.py:extract_knowledge",
-            "format select value",
-            {
-                "value": str(fmt_select.value),
-                "is_null": fmt_select.value is Select.NULL,
-            },
-            hypothesis_id="A",
-        )
-        # #endregion
         try:
             fmt = resolve_text_format(fmt_select)
         except ValueError as exc:
             status.update(f"[red]Invalid format selection: {exc}[/red]")
             return
-        # #region agent log
-        debug_log(
-            "ingest.py:extract_knowledge:resolved",
-            "resolved format",
-            {"fmt": None if fmt is None else fmt.value},
-            hypothesis_id="A",
-            run_id="post-fix",
-        )
-        # #endregion
         status.update("[yellow]Extracting...[/yellow]")
+        text_area.loading = True
         try:
             services = self.app.services  # type: ignore[attr-defined]
+            if services is None:
+                status.update(
+                    "[red]Database not connected. Start SurrealDB and restart the app.[/red]"
+                )
+                return
             result, doc_id = await services.ingest_and_extract(raw, fmt)
+            draft_note = ""
+            if services.draft_batch and services.draft_batch.id:
+                draft_note = f" Staging batch: {services.draft_batch.id}."
             status.update(
                 f"[green]Extracted {len(result.entities)} entities and "
-                f"{len(result.relationships)} relationships (doc: {doc_id}). "
+                f"{len(result.relationships)} relationships (doc: {doc_id})."
+                f"{draft_note} "
                 f"{len(services.pending_reviews)} items need review.[/green]"
             )
+        except RuntimeError as exc:
+            status.update(f"[red]{exc}[/red]")
         except Exception as exc:
             status.update(f"[red]Extraction failed: {exc}[/red]")
+        finally:
+            text_area.loading = False
 
     @work(exclusive=True)
-    async def commit_to_graph(self) -> None:
+    async def promote_to_graph(self) -> None:
         status = self.query_one("#ingest-status", Static)
-        text_area = self.query_one("#ingest-text", TextArea)
         services = self.app.services  # type: ignore[attr-defined]
-        if not services.last_extraction:
-            status.update("[red]Run extraction first.[/red]")
+        if services is None:
+            status.update(
+                "[red]Database not connected. Start SurrealDB and restart the app.[/red]"
+            )
+            return
+        if not services.draft_batch:
+            status.update("[red]Run extraction first (no staging draft).[/red]")
             return
         if services.pending_reviews:
-            status.update("[yellow]Pending reviews exist. Resolve them or commit with defaults.[/yellow]")
+            status.update(
+                "[yellow]Pending reviews exist. Resolve them or promote with defaults.[/yellow]"
+            )
             self.app.switch_screen("review")
             return
-        status.update("[yellow]Committing...[/yellow]")
+        status.update("[yellow]Promoting staging batch...[/yellow]")
         try:
-            entities, rels = await services.commit_extraction({})
-            text_area.text = ""
-            status.update(f"[green]Committed {entities} new entities and {rels} relationships.[/green]")
+            result = await services.promote_draft_batch({})
+            self.clear_input()
+            status.update(
+                f"[green]Promoted {result.entities_created} new entities, "
+                f"updated {result.entities_updated}, "
+                f"created {result.edges_created} relationships "
+                f"({result.edges_skipped} skipped).[/green]"
+            )
         except Exception as exc:
-            status.update(f"[red]Commit failed: {exc}[/red]")
+            status.update(f"[red]Promote failed: {exc}[/red]")
+
+    @work(exclusive=True)
+    async def discard_draft(self) -> None:
+        status = self.query_one("#ingest-status", Static)
+        services = self.app.services  # type: ignore[attr-defined]
+        if services is None:
+            status.update(
+                "[red]Database not connected. Start SurrealDB and restart the app.[/red]"
+            )
+            return
+        if not services.draft_batch:
+            status.update("[yellow]No draft staging batch to discard.[/yellow]")
+            return
+        try:
+            await services.discard_draft_batch()
+            status.update("[green]Draft discarded.[/green]")
+        except Exception as exc:
+            status.update(f"[red]Discard failed: {exc}[/red]")
