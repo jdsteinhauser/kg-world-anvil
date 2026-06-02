@@ -96,6 +96,7 @@ class StagingPromoter:
                 edge.confidence,
                 document_id,
                 edge.detail,
+                source_chunks=edge.source_chunks,
             )
             result.edges_created += 1
 
@@ -139,7 +140,11 @@ class StagingPromoter:
                 ):
                     target.broader_types.append(bt)
             target.attributes.update(group.attributes)
-            saved = await self.prod_repo.upsert_entity(target, document_id)
+            saved = await self.prod_repo.upsert_entity(
+                target,
+                document_id,
+                source_chunks=group.source_chunks,
+            )
             return saved, False
 
         new_entity = ResolvedEntity(
@@ -149,9 +154,14 @@ class StagingPromoter:
             aliases=group.aliases,
             broader_types=group.broader_types,
             attributes=group.attributes,
+            source_chunks=group.source_chunks,
             is_new=True,
         )
-        saved = await self.prod_repo.upsert_entity(new_entity, document_id)
+        saved = await self.prod_repo.upsert_entity(
+            new_entity,
+            document_id,
+            source_chunks=group.source_chunks,
+        )
         return saved, True
 
     async def _resolve_endpoint_from_staging(

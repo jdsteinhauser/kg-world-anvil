@@ -47,6 +47,7 @@ def collapse_staging_entities(
                 aliases=list(entity.aliases),
                 broader_types=list(entity.broader_types),
                 attributes=dict(entity.attributes),
+                source_chunks=list(entity.source_chunks),
                 member_ids=[entity.id] if entity.id else [],
             )
         )
@@ -69,10 +70,14 @@ def _merge_group(
     attributes: dict[str, Any] = dict(survivor.attributes)
     name = survivor.name
     member_ids: list[str] = []
+    source_chunks: list[str] = list(survivor.source_chunks)
 
     for member in members:
         if member.id:
             member_ids.append(member.id)
+        for chunk_id in member.source_chunks:
+            if chunk_id and chunk_id not in source_chunks:
+                source_chunks.append(chunk_id)
         if member.name and member.name != name and member.name not in aliases:
             aliases.append(member.name)
         for alias in member.aliases:
@@ -95,5 +100,6 @@ def _merge_group(
         aliases=aliases,
         broader_types=broader_types,
         attributes=attributes,
+        source_chunks=source_chunks,
         member_ids=member_ids,
     )

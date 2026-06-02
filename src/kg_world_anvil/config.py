@@ -23,10 +23,15 @@ class Settings(BaseSettings):
     surreal_db: str = "world_anvil"
 
     use_embeddings: bool = False
+    embedding_dim: int = 1536
     fuzzy_match_threshold: int = 85
 
     chunk_size: int = 4000
     chunk_overlap: int = 400
+
+    rag_chunk_size: int = 800
+    rag_chunk_overlap: int = 150
+    rag_top_k: int = 6
 
     auto_dedup: bool = True
     dedup_policy: str = "type-rank"

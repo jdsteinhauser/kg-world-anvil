@@ -1,7 +1,7 @@
 """Tests for ingestion and normalization."""
 
 from kg_world_anvil.ingestion.bbcode import clean_bbcode
-from kg_world_anvil.ingestion.chunker import chunk_text, clean_text, detect_format
+from kg_world_anvil.ingestion.chunker import chunk_spans, chunk_text, clean_text, detect_format
 from kg_world_anvil.ingestion.html import clean_html
 from kg_world_anvil.ingestion.markdown import clean_markdown
 from kg_world_anvil.models import TextFormat
@@ -35,6 +35,14 @@ def test_detect_format():
     assert detect_format("[b]Hi[/b]") == TextFormat.BBCODE
     assert detect_format("# Title\n\nBody") == TextFormat.MARKDOWN
     assert detect_format("Plain text") == TextFormat.PLAIN
+
+
+def test_chunk_spans_cover_document():
+    text = "paragraph one.\n\nparagraph two.\n\nparagraph three."
+    spans = chunk_spans(text, chunk_size=20, overlap=5)
+    assert spans
+    assert spans[0][0] == 0
+    assert spans[-1][1] <= len(text)
 
 
 def test_chunk_text_overlap():

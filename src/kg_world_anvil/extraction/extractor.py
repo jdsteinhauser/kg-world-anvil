@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from kg_world_anvil.config import Settings, get_settings
 from kg_world_anvil.models import (
+    ChunkExtraction,
     EntityAttribute,
     ExtractedEntity,
     ExtractedRelationship,
@@ -120,19 +121,38 @@ class KnowledgeExtractor:
             raise RuntimeError(refusal)
         return message.parsed
 
-    def extract_text(self, text: str, chunk_size: int | None = None, overlap: int | None = None) -> ExtractionResult:
-        from kg_world_anvil.ingestion.chunker import chunk_text
+    def extract_with_provenance(
+        self,
+        text: str,
+        chunk_size: int | None = None,
+        overlap: int | None = None,
+    ) -> list[ChunkExtraction]:
+        from kg_world_anvil.ingestion.chunker import chunk_spans
 
-        chunks = chunk_text(
+        spans = chunk_spans(
             text,
             chunk_size=chunk_size or self.settings.chunk_size,
             overlap=overlap or self.settings.chunk_overlap,
         )
+        extractions: list[ChunkExtraction] = []
+        for start_char, end_char, chunk_text in spans:
+            result = self.extract_chunk(chunk_text)
+            extractions.append(
+                ChunkExtraction(
+                    start_char=start_char,
+                    end_char=end_char,
+                    text=chunk_text,
+                    result=result,
+                )
+            )
+        return extractions
+
+    def extract_text(self, text: str, chunk_size: int | None = None, overlap: int | None = None) -> ExtractionResult:
+        extractions = self.extract_with_provenance(text, chunk_size=chunk_size, overlap=overlap)
         merged = ExtractionResult(entities=[], relationships=[])
-        for chunk in chunks:
-            result = self.extract_chunk(chunk)
-            merged.entities.extend(result.entities)
-            merged.relationships.extend(result.relationships)
+        for item in extractions:
+            merged.entities.extend(item.result.entities)
+            merged.relationships.extend(item.result.relationships)
         deduped = dedupe_extraction(merged)
         normalized = normalize_extraction_result(deduped)
         return filter_negated_relationships(normalized, text)

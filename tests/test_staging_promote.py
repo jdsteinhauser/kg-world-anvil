@@ -170,6 +170,7 @@ class FakePromoteProdRepo:
         entity: ResolvedEntity,
         document_id: str | None = None,
         embedding: list[float] | None = None,
+        source_chunks: list[str] | None = None,
     ) -> ResolvedEntity:
         self.upsert_calls += 1
         if entity.id:
@@ -197,6 +198,7 @@ class FakePromoteProdRepo:
         confidence: float = 1.0,
         document_id: str | None = None,
         detail: str = "",
+        source_chunks: list[str] | None = None,
     ):
         self.relationships.append((from_id, to_id, predicate))
         return None

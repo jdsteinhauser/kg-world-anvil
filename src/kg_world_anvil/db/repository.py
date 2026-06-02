@@ -16,7 +16,7 @@ from kg_world_anvil.db.relations import (
     predicate_from_record_id,
 )
 from kg_world_anvil.extraction.predicates import is_absence_relationship
-from kg_world_anvil.models import CanonicalPredicate, DocumentRecord, GraphEdge, ResolvedEntity, TextFormat, coerce_text_format
+from kg_world_anvil.models import CanonicalPredicate, ChunkRecord, ChunkSearchHit, DocumentRecord, GraphEdge, ResolvedEntity, TextFormat, coerce_text_format
 from kg_world_anvil.normalization.names import canonical_key, normalize_display_name, normalize_entity_type
 
 
@@ -114,6 +114,96 @@ class GraphRepository:
             ingested_at=row.get("ingested_at"),
         )
 
+    async def list_documents(self, limit: int = 500) -> list[DocumentRecord]:
+        rows = await self.client.query("SELECT * FROM document LIMIT $limit;", {"limit": limit})
+        return [self._row_to_document(r) for r in _all_results(rows)]
+
+    async def document_has_chunks(self, document_id: str) -> bool:
+        doc_ref = _to_record_id(document_id, "document")
+        sql = "SELECT id FROM chunk WHERE document = $doc LIMIT 1;"
+        rows = await self.client.query(sql, {"doc": doc_ref})
+        return _first_result(rows) is not None
+
+    async def delete_chunks_for_document(self, document_id: str) -> None:
+        doc_ref = _to_record_id(document_id, "document")
+        await self.client.query("DELETE chunk WHERE document = $doc;", {"doc": doc_ref})
+
+    async def create_chunks(
+        self,
+        document_id: str,
+        spans: list[tuple[int, int, str]],
+        embeddings: list[list[float]] | None = None,
+    ) -> list[ChunkRecord]:
+        doc_ref = _to_record_id(document_id, "document")
+        created: list[ChunkRecord] = []
+        for seq, (start_char, end_char, text) in enumerate(spans):
+            embedding = embeddings[seq] if embeddings and seq < len(embeddings) else None
+            sql = """
+            CREATE chunk SET
+                document = $doc,
+                seq = $seq,
+                text = $text,
+                start_char = $start,
+                end_char = $end,
+                embedding = $embedding,
+                created_at = time::now()
+            RETURN AFTER;
+            """
+            rows = await self.client.query(
+                sql,
+                {
+                    "doc": doc_ref,
+                    "seq": seq,
+                    "text": text,
+                    "start": start_char,
+                    "end": end_char,
+                    "embedding": embedding,
+                },
+            )
+            row = _first_result(rows)
+            if row:
+                created.append(self._row_to_chunk(row))
+        return created
+
+    async def get_chunks_for_document(self, document_id: str) -> list[ChunkRecord]:
+        doc_ref = _to_record_id(document_id, "document")
+        sql = """
+        SELECT * FROM chunk
+        WHERE document = $doc
+        ORDER BY seq ASC;
+        """
+        rows = await self.client.query(sql, {"doc": doc_ref})
+        return [self._row_to_chunk(r) for r in _all_results(rows)]
+
+    async def resolve_chunk_ids(self, document_id: str, seqs: list[int]) -> list[str]:
+        if not seqs:
+            return []
+        doc_ref = _to_record_id(document_id, "document")
+        sql = """
+        SELECT id, seq FROM chunk
+        WHERE document = $doc AND seq IN $seqs;
+        """
+        rows = await self.client.query(sql, {"doc": doc_ref, "seqs": seqs})
+        by_seq = {int(r.get("seq", -1)): _record_id(r.get("id")) for r in _all_results(rows)}
+        return [by_seq[seq] for seq in seqs if seq in by_seq]
+
+    async def search_chunks(self, query_vec: list[float], k: int = 6) -> list[ChunkSearchHit]:
+        sql = build_chunk_knn_sql(k)
+        rows = await self.client.query(sql, {"qvec": query_vec})
+        hits: list[ChunkSearchHit] = []
+        for row in _all_results(rows):
+            doc = row.get("document")
+            hits.append(
+                ChunkSearchHit(
+                    id=_record_id(row.get("id")),
+                    document_id=_record_id(doc),
+                    seq=int(row.get("seq", 0)),
+                    text=row.get("text", ""),
+                    distance=float(row.get("distance", 0.0)),
+                )
+            )
+        return hits
+
     async def find_entity_by_key(self, canonical_key_val: str, entity_type: str) -> ResolvedEntity | None:
         entity_type_cf = normalize_entity_type(entity_type)
         for entity in await self.find_entities_by_canonical_key(canonical_key_val):
@@ -160,9 +250,12 @@ class GraphRepository:
         entity: ResolvedEntity,
         document_id: str | None = None,
         embedding: list[float] | None = None,
+        source_chunks: list[str] | None = None,
     ) -> ResolvedEntity:
         doc_ref = _to_record_id(document_id, "document")
         entity_ref = _to_record_id(entity.id, "entity") if entity.id else None
+        chunk_refs = [_to_record_id(chunk_id, "chunk") for chunk_id in (source_chunks or entity.source_chunks or [])]
+        chunk_refs = [ref for ref in chunk_refs if ref is not None]
         if not entity.id:
             existing = await self.find_entity_by_key(entity.canonical_key, entity.type)
             if existing and existing.id:
@@ -177,7 +270,13 @@ class GraphRepository:
                 attributes = $attributes,
                 embedding = IF $embedding IS NONE THEN embedding ELSE $embedding END,
                 source_documents = IF $doc IS NONE THEN source_documents
-                    ELSE array::distinct(source_documents + [$doc]) END,
+                    ELSE array::distinct(
+                        (IF source_documents IS NONE THEN [] ELSE source_documents END) + [$doc]
+                    ) END,
+                source_chunks = IF array::len($chunks) = 0 THEN source_chunks
+                    ELSE array::distinct(
+                        (IF source_chunks IS NONE THEN [] ELSE source_chunks END) + $chunks
+                    ) END,
                 updated_at = time::now()
             RETURN AFTER;
             """
@@ -191,6 +290,7 @@ class GraphRepository:
                     "attributes": entity.attributes,
                     "embedding": embedding,
                     "doc": doc_ref,
+                    "chunks": chunk_refs,
                 },
             )
         else:
@@ -204,6 +304,7 @@ class GraphRepository:
                 attributes = $attributes,
                 embedding = $embedding,
                 source_documents = IF $doc IS NONE THEN [] ELSE [$doc] END,
+                source_chunks = $chunks,
                 created_at = time::now(),
                 updated_at = time::now()
             RETURN AFTER;
@@ -219,6 +320,7 @@ class GraphRepository:
                     "attributes": entity.attributes,
                     "embedding": embedding,
                     "doc": doc_ref,
+                    "chunks": chunk_refs,
                 },
             )
         row = _first_result(rows)
@@ -232,6 +334,7 @@ class GraphRepository:
         confidence: float = 1.0,
         document_id: str | None = None,
         detail: str = "",
+        source_chunks: list[str] | None = None,
     ) -> GraphEdge:
         if is_absence_relationship(predicate):
             raise ValueError(f"Absence relationships are not stored: {predicate}")
@@ -242,12 +345,15 @@ class GraphRepository:
         from_ref = _to_record_id(from_id, "entity")
         to_ref = _to_record_id(to_id, "entity")
         doc_ref = _to_record_id(document_id, "document")
+        chunk_refs = [_to_record_id(chunk_id, "chunk") for chunk_id in (source_chunks or [])]
+        chunk_refs = [ref for ref in chunk_refs if ref is not None]
         relation_table = await ensure_relation_table(self.client, predicate)
         sql = f"""
         RELATE $from->{relation_table}->$to SET
             confidence = $confidence,
             detail = $detail,
             source_document = $doc,
+            source_chunks = $chunks,
             extracted_at = time::now()
         RETURN AFTER;
         """
@@ -259,6 +365,7 @@ class GraphRepository:
                 "confidence": confidence,
                 "detail": detail,
                 "doc": doc_ref,
+                "chunks": chunk_refs,
             },
         )
         row = _first_result(rows)
@@ -269,6 +376,7 @@ class GraphRepository:
             detail=row.get("detail") or detail,
             confidence=row.get("confidence", confidence),
             source_document_id=_record_id(row.get("source_document")),
+            source_chunks=[_record_id(item) for item in (row.get("source_chunks") or [])],
             from_entity_id=from_id,
             from_entity_name="",
             to_entity_id=to_id,
@@ -477,8 +585,40 @@ class GraphRepository:
             broader_types=list(row.get("broader_types") or []),
             attributes=dict(row.get("attributes") or {}),
             embedding=list(row.get("embedding") or []) or None,
+            source_chunks=[_record_id(item) for item in (row.get("source_chunks") or [])],
             is_new=False,
         )
+
+    def _row_to_document(self, row: dict[str, Any]) -> DocumentRecord:
+        return DocumentRecord(
+            id=_record_id(row.get("id")),
+            raw=row.get("raw", ""),
+            format=coerce_text_format(row.get("format")),
+            content_hash=row.get("content_hash", ""),
+            ingested_at=row.get("ingested_at"),
+        )
+
+    def _row_to_chunk(self, row: dict[str, Any]) -> ChunkRecord:
+        doc = row.get("document")
+        return ChunkRecord(
+            id=_record_id(row.get("id")),
+            document_id=_record_id(doc),
+            seq=int(row.get("seq", 0)),
+            text=row.get("text", ""),
+            start_char=int(row.get("start_char", 0)),
+            end_char=int(row.get("end_char", 0)),
+            embedding=list(row.get("embedding") or []) or None,
+        )
+
+
+def build_chunk_knn_sql(k: int, ef: int = 40) -> str:
+    """Build SurrealQL for HNSW KNN search; k and ef must be literals."""
+    return f"""
+    SELECT id, text, document, seq, vector::distance::knn() AS distance
+    FROM chunk
+    WHERE embedding <|{k},{ef}|> $qvec
+    ORDER BY distance ASC;
+    """
 
 
 def rows_to_query_result(rows: list[dict[str, Any]]) -> tuple[list[str], list[list[Any]]]:

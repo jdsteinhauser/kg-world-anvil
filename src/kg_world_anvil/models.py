@@ -135,6 +135,7 @@ class ResolvedEntity(BaseModel):
     broader_types: list[str] = Field(default_factory=list)
     attributes: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] | None = None
+    source_chunks: list[str] = Field(default_factory=list)
     is_new: bool = False
 
 
@@ -181,6 +182,7 @@ class StagingEdge(BaseModel):
     confidence: float = 1.0
     from_entity_id: str
     to_entity_id: str
+    source_chunks: list[str] = Field(default_factory=list)
 
 
 class CollapsedStagingEntity(BaseModel):
@@ -190,6 +192,7 @@ class CollapsedStagingEntity(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     broader_types: list[str] = Field(default_factory=list)
     attributes: dict[str, Any] = Field(default_factory=dict)
+    source_chunks: list[str] = Field(default_factory=list)
     member_ids: list[str] = Field(default_factory=list)
 
 
@@ -209,12 +212,52 @@ class DocumentRecord(BaseModel):
     ingested_at: datetime | None = None
 
 
+class ChunkRecord(BaseModel):
+    id: str | None = None
+    document_id: str
+    seq: int
+    text: str
+    start_char: int = 0
+    end_char: int = 0
+    embedding: list[float] | None = None
+
+
+class ChunkSearchHit(BaseModel):
+    id: str
+    document_id: str
+    seq: int
+    text: str
+    distance: float = 0.0
+
+
+class RAGCitation(BaseModel):
+    document_id: str
+    seq: int
+    snippet: str
+
+
+class RAGAnswer(BaseModel):
+    question: str
+    answer: str
+    citations: list[RAGCitation] = Field(default_factory=list)
+
+
+class ChunkExtraction(BaseModel):
+    """Extraction result for one extraction chunk with document char span."""
+
+    start_char: int
+    end_char: int
+    text: str
+    result: ExtractionResult
+
+
 class GraphEdge(BaseModel):
     id: str | None = None
     predicate: str
     detail: str = ""
     confidence: float = 1.0
     source_document_id: str | None = None
+    source_chunks: list[str] = Field(default_factory=list)
     from_entity_id: str
     from_entity_name: str
     to_entity_id: str

@@ -45,6 +45,7 @@ class IngestScreen(Screen):
             Button("Promote to Graph", id="commit-btn"),
             Button("Review Queue", id="review-btn"),
             Button("Discard Draft", id="discard-btn"),
+            Button("Backfill RAG Chunks", id="backfill-btn"),
             id="ingest-actions",
         )
         yield Static("Paste or load text, then extract entities and relationships.", id="ingest-status")
@@ -79,6 +80,26 @@ class IngestScreen(Screen):
     @on(Button.Pressed, "#discard-btn")
     def on_discard(self) -> None:
         self.discard_draft()
+
+    @on(Button.Pressed, "#backfill-btn")
+    def on_backfill(self) -> None:
+        self.backfill_rag_chunks()
+
+    @work(exclusive=True)
+    async def backfill_rag_chunks(self) -> None:
+        status = self.query_one("#ingest-status", Static)
+        services = self.app.services  # type: ignore[attr-defined]
+        if services is None:
+            status.update(
+                "[red]Database not connected. Start SurrealDB and restart the app.[/red]"
+            )
+            return
+        status.update("[yellow]Backfilling RAG chunks for existing documents...[/yellow]")
+        try:
+            count = await services.backfill_chunks()
+            status.update(f"[green]Indexed RAG chunks for {count} document(s).[/green]")
+        except Exception as exc:
+            status.update(f"[red]Backfill failed: {exc}[/red]")
 
     @work(exclusive=True)
     async def extract_knowledge(self) -> None:

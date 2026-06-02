@@ -10,6 +10,7 @@ _RELATION_FIELD_STATEMENTS = (
     "DEFINE FIELD confidence ON {table} TYPE float DEFAULT 1.0;",
     "DEFINE FIELD detail ON {table} TYPE string DEFAULT '';",
     "DEFINE FIELD source_document ON {table} TYPE option<record<document>> DEFAULT NONE;",
+    "DEFINE FIELD source_chunks ON {table} TYPE array<record<chunk>> DEFAULT [];",
     "DEFINE FIELD extracted_at ON {table} TYPE datetime DEFAULT time::now();",
 )
 

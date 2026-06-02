@@ -46,7 +46,7 @@ class KgApp(App):
         height: 1fr;
         margin: 0 2;
     }
-    #raw-sql, #generated-sql {
+    #raw-sql, #generated-sql, #rag-answer {
         height: 8;
         margin: 0 2;
     }

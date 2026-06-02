@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import math
 
-from openai import OpenAI
 from rapidfuzz import fuzz
 
 from kg_world_anvil.config import Settings, get_settings
+from kg_world_anvil.embeddings import EmbeddingClient
 from kg_world_anvil.models import ExtractedEntity, MergeCandidate, ResolvedEntity
 from kg_world_anvil.models import attributes_to_dict
 from kg_world_anvil.db.repository import GraphRepository
 from kg_world_anvil.normalization.names import (
     canonical_key,
-    entity_identity_key,
     normalize_display_name,
     normalize_entity_type,
 )
@@ -27,9 +26,7 @@ class EntityResolver:
     ) -> None:
         self.repo = repo
         self.settings = settings or get_settings()
-        self._openai: OpenAI | None = None
-        if self.settings.openai_api_key:
-            self._openai = OpenAI(api_key=self.settings.openai_api_key)
+        self._embeddings = EmbeddingClient(self.settings)
 
     async def resolve_entity(
         self,
@@ -99,7 +96,7 @@ class EntityResolver:
                     )
                 )
 
-        if self.settings.use_embeddings and self._openai:
+        if self.settings.use_embeddings and self._embeddings.available:
             embedding_candidates = await self._embedding_candidates(
                 ExtractedEntity(name=display_name, type=entity_type, attributes=extracted.attributes),
                 pool,
@@ -145,13 +142,13 @@ class EntityResolver:
         extracted: ExtractedEntity,
         pool: list[ResolvedEntity],
     ) -> list[MergeCandidate]:
-        if not self._openai:
+        if not self._embeddings.available:
             return []
         same_type = [e for e in pool if e.type == extracted.type]
         if not same_type:
             return []
 
-        query_vec = self._embed(extracted.name)
+        query_vec = self._embeddings.embed_text(extracted.name)
         candidates: list[MergeCandidate] = []
         for entity in same_type:
             target_vec = entity.embedding
@@ -172,19 +169,10 @@ class EntityResolver:
                 )
         return candidates
 
-    def _embed(self, text: str) -> list[float]:
-        if not self._openai:
-            return []
-        response = self._openai.embeddings.create(
-            model=self.settings.openai_embedding_model,
-            input=text,
-        )
-        return response.data[0].embedding
-
     async def embed_entity(self, name: str) -> list[float] | None:
-        if not self.settings.use_embeddings or not self._openai:
+        if not self.settings.use_embeddings or not self._embeddings.available:
             return None
-        return self._embed(name)
+        return self._embeddings.embed_text(name)
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

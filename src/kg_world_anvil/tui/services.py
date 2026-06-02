@@ -10,9 +10,16 @@ from kg_world_anvil.consistency.rules import ConsistencyChecker
 from kg_world_anvil.db.client import DatabaseClient
 from kg_world_anvil.db.repository import GraphRepository
 from kg_world_anvil.db.staging_repository import StagingRepository
-from kg_world_anvil.extraction.extractor import KnowledgeExtractor
-from kg_world_anvil.ingestion.chunker import clean_text, detect_format
+from kg_world_anvil.extraction.extractor import (
+    KnowledgeExtractor,
+    dedupe_extraction,
+    filter_negated_relationships,
+    normalize_extraction_result,
+)
+from kg_world_anvil.embeddings import EmbeddingClient
+from kg_world_anvil.ingestion.chunker import chunk_spans, clean_text, detect_format
 from kg_world_anvil.models import (
+    ChunkRecord,
     ExtractionResult,
     MergeCandidate,
     MergePlan,
@@ -25,6 +32,7 @@ from kg_world_anvil.normalization.names import canonical_key
 from kg_world_anvil.normalization.resolver import EntityResolver
 from kg_world_anvil.query.nl import NLQueryTranslator
 from kg_world_anvil.query.queries import QueryService
+from kg_world_anvil.query.rag import RAGService
 from kg_world_anvil.staging.collapse import collapse_staging_entities
 from kg_world_anvil.staging.promoter import StagingPromoter
 
@@ -49,6 +57,7 @@ class AppServices:
     resolver: EntityResolver
     query_service: QueryService
     nl_translator: NLQueryTranslator
+    rag_service: RAGService
     consistency: ConsistencyChecker
     deduplicator: EntityDeduplicator
     pending_reviews: list[PendingReview] = field(default_factory=list)
@@ -74,6 +83,7 @@ class AppServices:
             resolver=EntityResolver(repo, settings),
             query_service=QueryService(repo),
             nl_translator=NLQueryTranslator(settings),
+            rag_service=RAGService(repo, settings),
             consistency=ConsistencyChecker(repo),
             deduplicator=EntityDeduplicator(repo),
         )
@@ -99,19 +109,66 @@ class AppServices:
             doc = await self.repo.create_document(cleaned, detected, content_hash)
             doc_id = doc.id or ""
 
-        result = self.extractor.extract_text(cleaned)
+        rag_chunks: list[ChunkRecord] = []
+        if self.settings.use_embeddings:
+            rag_chunks = await self._index_document_chunks(doc_id, cleaned)
+
+        extractions = self.extractor.extract_with_provenance(cleaned)
+        merged = ExtractionResult(entities=[], relationships=[])
+        for item in extractions:
+            merged.entities.extend(item.result.entities)
+            merged.relationships.extend(item.result.relationships)
+        result = filter_negated_relationships(
+            normalize_extraction_result(dedupe_extraction(merged)),
+            cleaned,
+        )
         self.last_extraction = result
         self.last_document_id = doc_id
 
         if self.settings.use_staging:
             self.draft_batch = await self.staging_repo.replace_draft_for_document(
-                doc_id, result
+                doc_id,
+                result,
+                extractions=extractions if rag_chunks else None,
+                rag_chunks=rag_chunks or None,
             )
             await self._build_staging_review_queue()
         else:
             await self._build_legacy_review_queue(result)
 
         return result, doc_id
+
+    async def _index_document_chunks(
+        self,
+        document_id: str,
+        text: str,
+    ) -> list[ChunkRecord]:
+        spans = chunk_spans(
+            text,
+            chunk_size=self.settings.rag_chunk_size,
+            overlap=self.settings.rag_chunk_overlap,
+        )
+        if not spans:
+            return []
+        await self.repo.delete_chunks_for_document(document_id)
+        embedder = EmbeddingClient(self.settings)
+        embeddings = embedder.embed_texts([span[2] for span in spans]) if embedder.available else None
+        return await self.repo.create_chunks(document_id, spans, embeddings)
+
+    async def backfill_chunks(self) -> int:
+        if not self.settings.use_embeddings:
+            raise RuntimeError("Enable USE_EMBEDDINGS in config to backfill RAG chunks.")
+        embedder = EmbeddingClient(self.settings)
+        if not embedder.available:
+            raise RuntimeError("OpenAI API key is required for chunk embeddings.")
+
+        indexed = 0
+        for doc in await self.repo.list_documents():
+            if not doc.id or await self.repo.document_has_chunks(doc.id):
+                continue
+            await self._index_document_chunks(doc.id, doc.raw)
+            indexed += 1
+        return indexed
 
     async def _build_staging_review_queue(self) -> None:
         self.pending_reviews.clear()

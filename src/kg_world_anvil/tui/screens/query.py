@@ -1,10 +1,10 @@
-"""Query screen with NL, saved, and raw SurrealQL modes."""
+"""Query screen with NL, Ask (RAG), saved, and raw SurrealQL modes."""
 
 from __future__ import annotations
 
 from textual import on, work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Select, Static, TextArea
 
@@ -22,6 +22,7 @@ class QueryScreen(Screen):
         yield Select(
             [
                 ("Natural Language", "nl"),
+                ("Ask (RAG)", "ask"),
                 ("Saved Query", "saved"),
                 ("Raw SurrealQL", "raw"),
             ],
@@ -38,6 +39,7 @@ class QueryScreen(Screen):
         yield Input(placeholder="Second parameter (if needed)", id="saved-param-2")
         yield TextArea("", id="raw-sql", language="sql")
         yield TextArea("", id="generated-sql", language="sql", read_only=True)
+        yield TextArea("", id="rag-answer", read_only=True)
         yield Horizontal(
             Button("Generate SQL", variant="primary", id="generate-btn"),
             Button("Run Query", variant="success", id="run-btn"),
@@ -70,7 +72,7 @@ class QueryScreen(Screen):
         self._update_mode_visibility("raw")
 
     def _update_mode_visibility(self, mode: str) -> None:
-        self.query_one("#nl-question").display = mode == "nl"
+        self.query_one("#nl-question").display = mode in {"nl", "ask"}
         self.query_one("#saved-query-select").display = mode == "saved"
         self.query_one("#saved-param-1").display = mode == "saved"
         self.query_one("#saved-param-2").display = mode == "saved"
@@ -78,6 +80,8 @@ class QueryScreen(Screen):
         self.query_one("#generated-sql").display = mode == "nl"
         self.query_one("#edit-btn").display = mode == "nl"
         self.query_one("#raw-sql").display = mode == "raw"
+        self.query_one("#rag-answer").display = mode == "ask"
+        self.query_one("#query-results").display = mode != "ask"
 
     @on(Select.Changed, "#query-mode")
     def on_mode_changed(self, event: Select.Changed) -> None:
@@ -106,6 +110,23 @@ class QueryScreen(Screen):
         services = self.app.services  # type: ignore[attr-defined]
         status.update("[yellow]Running query...[/yellow]")
         try:
+            if mode == "ask":
+                question = self.query_one("#nl-question", Input).value.strip()
+                if not question:
+                    status.update("[red]Enter a question to ask.[/red]")
+                    return
+                answer = await services.rag_service.answer(question)
+                self.query_one("#rag-answer", TextArea).text = answer.answer
+                if answer.citations:
+                    cites = "\n".join(
+                        f"- {item.document_id} chunk {item.seq}: {item.snippet[:120]}..."
+                        for item in answer.citations
+                    )
+                    status.update(f"[green]Answer generated with {len(answer.citations)} citation(s).[/green]\n{cites}")
+                else:
+                    status.update("[green]Answer generated.[/green]")
+                return
+
             if mode == "nl":
                 sql = self.query_one("#generated-sql", TextArea).text.strip()
                 if not sql:
